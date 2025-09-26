@@ -2,10 +2,9 @@ name: Fetch Clash Subscription
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 每5分钟运行一次
+    - cron: '*/5 * * * *'
   watch:
-    types: 
-      - started  # 当有人star这个仓库时触发
+    types: [started]
 
 jobs:
   fetch-clash-subscription:
@@ -13,21 +12,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          persist-credentials: true
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '16'
-          # 移除缓存配置，避免查找锁文件
-          
-      - name: Create package.json and install dependencies
+
+      - name: Install dependencies
         run: |
-          # 生成package.json文件
-          echo '{"name":"clash-fetcher","version":"1.0.0"}' > package.json
-          # 安装axios
-          npm install axios
+          npm install axios tough-cookie axios-cookiejar-support
 
       - name: Fetch and extract subscription link
         id: extract-link
@@ -39,90 +32,97 @@ jobs:
           }
           
           echo "Extracting subscription link..."
-          # 1. 提取包含“https://”的链接（避免漏截或多截）
-          # 2. 用sed删除可能多余的“/”（如“https:///xxx”改为“https://xxx”）
           LINK=$(grep -A 5 ">🚀免费Clash订阅链接" README.md | grep -Eo 'https://[^ ]+' | head -n 1 | sed 's|https:///|https://|g')
-      
+
           if [ -z "$LINK" ]; then
             echo "Failed to find the subscription link."
             exit 1
           fi
-      
-          # 验证链接格式（必须包含“https://”且无多余字符）
-          if ! echo "$LINK" | grep -q '^https://[a-zA-Z0-9.-]'; then
-            echo "Invalid link format: $LINK"
-            exit 1
-          fi
-      
+
           echo "Found valid link: $LINK"
           echo "LINK=$LINK" >> $GITHUB_ENV
-          echo "::set-output name=link::$LINK"
 
-      - name: Download subscription content
+      - name: Download subscription with advanced bypass
         run: |
           node -e "
           const axios = require('axios');
+          const { CookieJar } = require('tough-cookie');
+          const { wrapper } = require('axios-cookiejar-support');
           const fs = require('fs');
           const url = process.env.LINK;
           
-          console.log('Downloading from:', url);
-          
-          // 完整的浏览器请求头，模拟Chrome浏览器
+          // 创建带Cookie支持的axios实例（Cloudflare需要Cookie验证）
+          const cookieJar = new CookieJar();
+          const axiosInstance = wrapper(axios.create({
+            jar: cookieJar,
+            withCredentials: true,
+            timeout: 30000
+          }));
+
+          // 更贴近真实浏览器的请求头
           const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://github.com/', // 补充来源页，避免“无来源”拦截
+            'Referer': 'https://github.com/',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'cross-site',
             'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
+            'Cache-Control': 'max-age=0',
+            'DNT': '1' // 增加Do Not Track头，模拟隐私保护浏览器
           };
-      
-          axios.get(url, { 
-            responseType: 'text',
-            headers: headers,
-            timeout: 20000, // 延长超时时间，避免Cloudflare验证耗时导致超时
-            decompress: true // 支持gzip解压，匹配浏览器行为
-          })
+
+          // 先发送一个预检请求获取必要的Cookie
+          axiosInstance.get(new URL(url).origin, { headers })
             .then(response => {
-              console.log('Download success, status code:', response.status);
+              console.log('Preflight request successful, status:', response.status);
+              // 等待1-2秒，模拟人类浏览延迟
+              return new Promise(resolve => setTimeout(resolve, 1500));
+            })
+            .then(() => {
+              // 发送实际请求
+              return axiosInstance.get(url, { headers });
+            })
+            .then(response => {
+              console.log('Download successful, status:', response.status);
+              
               let content = response.data;
               
-              // 检查是否被重定向到Cloudflare验证页（如包含“Cloudflare”关键词）
-              if (content.includes('Cloudflare')) {
-                console.error('Warning: Content contains Cloudflare verification page');
-                fs.writeFileSync('cloudflare_block.html', content); // 保存拦截页，便于后续分析
-                process.exit(1);
-              }
-      
-              // Base64解码逻辑（保留原功能）
+              // 检查是否是Base64编码
               try {
                 if (content.trim().length % 4 === 0 && /^[A-Za-z0-9+/=]+$/.test(content.trim())) {
                   content = Buffer.from(content.trim(), 'base64').toString('utf8');
                   console.log('Base64 decoded successfully');
                 }
               } catch (e) {
-                console.log('Not Base64 content, use original');
+                console.log('Not Base64 content, using original');
               }
-      
+              
               fs.writeFileSync('clash_subscription.txt', content);
-              console.log('Content saved to clash_subscription.txt');
+              console.log('Content saved successfully');
             })
             .catch(error => {
               console.error('Download failed:', error.message);
+              
               if (error.response) {
                 console.error('Response status:', error.response.status);
-                // 保存错误响应内容，便于分析Cloudflare拦截原因
+                
+                // 保存响应内容用于分析
                 fs.writeFileSync('error_response.html', error.response.data);
+                
+                // 特别处理Cloudflare的挑战页面
+                if (error.response.data.includes('Cloudflare')) {
+                  console.error('Cloudflare protection detected. Consider using a proxy.');
+                }
               }
+              
               process.exit(1);
             });
-          "          
+          "
         env:
           LINK: ${{ env.LINK }}
 
@@ -145,5 +145,3 @@ jobs:
           git add clash_subscription.txt
           git commit -m "Update clash subscription at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push "https://${{ secrets.MY_PERSONAL_ACCESS_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
-        env:
-          MY_PERSONAL_ACCESS_TOKEN: ${{ secrets.MY_PERSONAL_ACCESS_TOKEN }}
