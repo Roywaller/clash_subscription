@@ -20,10 +20,13 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: '16'
-          cache: 'npm'  # 缓存npm依赖，加快安装速度
-
-      - name: Install dependencies
+          # 移除缓存配置，避免查找锁文件
+          
+      - name: Create package.json and install dependencies
         run: |
+          # 生成package.json文件
+          echo '{"name":"clash-fetcher","version":"1.0.0"}' > package.json
+          # 安装axios
           npm install axios
 
       - name: Fetch and extract subscription link
@@ -64,10 +67,9 @@ jobs:
           })
             .then(response => {
               if (response.status === 200) {
-                // 尝试解码Base64（许多Clash订阅使用Base64编码）
+                // 尝试解码Base64
                 let content = response.data;
                 try {
-                  // 检查是否为Base64编码
                   if (/^[A-Za-z0-9+/=]+$/.test(content.trim())) {
                     content = Buffer.from(content, 'base64').toString('utf8');
                     console.log('Successfully decoded Base64 content');
