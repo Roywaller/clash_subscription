@@ -5,7 +5,7 @@ on:
     - cron: '*/5 * * * *'  # 每5分钟运行一次
   watch:
     types: 
-      - started  # 当有人 star 这个仓库时触发
+      - started  # 当有人star这个仓库时触发
 
 jobs:
   fetch-clash-subscription:
@@ -14,71 +14,105 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          persist-credentials: true  # 启用凭证持久化，自动使用 GITHUB_TOKEN 进行身份验证
+          persist-credentials: true
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '16'  # 可以根据需要更改版本
+          node-version: '16'
+          cache: 'npm'  # 缓存npm依赖，加快安装速度
 
       - name: Install dependencies
         run: |
           npm install axios
 
-      - name: Fetch README.md content
+      - name: Fetch and extract subscription link
+        id: extract-link
         run: |
-          # 下载 README.md 文件
-          wget -O README.md https://raw.githubusercontent.com/abshare/abshare.github.io/refs/heads/main/README.md
+          echo "Fetching README.md..."
+          wget -O README.md https://raw.githubusercontent.com/abshare/abshare.github.io/refs/heads/main/README.md || {
+            echo "Failed to download README.md"
+            exit 1
+          }
           
-          # 输出 README.md 的内容以调试
-          echo "Content of README.md:"
-          cat README.md
-          
-          # 提取链接并修复格式
+          echo "Extracting subscription link..."
           LINK=$(grep -A 5 ">🚀免费Clash订阅链接" README.md | grep -Eo 'https:/[^"]+' | head -n 1 | sed 's|https:/|https://|')
 
-          # 检查链接是否为空
           if [ -z "$LINK" ]; then
-            echo "Failed to find the download link."
+            echo "Failed to find the subscription link."
             exit 1
           fi
 
-          # 输出提取的链接
-          echo "Download link is: $LINK"
-          
-          # 设置环境变量
+          echo "Found subscription link: $LINK"
           echo "LINK=$LINK" >> $GITHUB_ENV
+          echo "::set-output name=link::$LINK"
 
-      - name: Download using Node.js
+      - name: Download subscription content
         run: |
           node -e "
           const axios = require('axios');
           const fs = require('fs');
-
           const url = process.env.LINK;
           
-          axios.get(url, { responseType: 'arraybuffer' })
+          console.log('Downloading from:', url);
+          
+          axios.get(url, { 
+            responseType: 'text',
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+          })
             .then(response => {
               if (response.status === 200) {
-                fs.writeFileSync('clash_subscription.txt', response.data);
-                console.log('Downloaded content saved to clash_subscription.txt');
+                // 尝试解码Base64（许多Clash订阅使用Base64编码）
+                let content = response.data;
+                try {
+                  // 检查是否为Base64编码
+                  if (/^[A-Za-z0-9+/=]+$/.test(content.trim())) {
+                    content = Buffer.from(content, 'base64').toString('utf8');
+                    console.log('Successfully decoded Base64 content');
+                  }
+                } catch (e) {
+                  console.log('Content is not Base64 encoded or decoding failed');
+                }
+                
+                fs.writeFileSync('clash_subscription.txt', content);
+                console.log('Subscription content saved to clash_subscription.txt');
               } else {
-                console.error('Failed to download content. Status code:', response.status);
+                console.error('Download failed with status code:', response.status);
                 process.exit(1);
               }
             })
             .catch(error => {
-              console.error('Error occurred while downloading:', error.message);
+              console.error('Error downloading subscription:', error.message);
+              if (error.response) {
+                console.error('Response status:', error.response.status);
+                console.error('Response data:', error.response.data);
+              }
               process.exit(1);
             });
           "          
         env:
           LINK: ${{ env.LINK }}
 
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if git diff --quiet clash_subscription.txt; then
+            echo "No changes to subscription"
+            echo "CHANGED=false" >> $GITHUB_ENV
+          else
+            echo "Subscription has changed"
+            echo "CHANGED=true" >> $GITHUB_ENV
+          fi
+
       - name: Commit and push changes
+        if: env.CHANGED == 'true'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add clash_subscription.txt
-          git commit -m "Update clash_subscription.txt"
+          git commit -m "Update clash subscription at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push "https://${{ secrets.MY_PERSONAL_ACCESS_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+        env:
+          MY_PERSONAL_ACCESS_TOKEN: ${{ secrets.MY_PERSONAL_ACCESS_TOKEN }}
